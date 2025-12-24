@@ -1,0 +1,12 @@
+Place the following GEO-curated files in this folder (or change paths in scripts):
+
+- GEO_processed_matrix_AdV_year1_serum.tsv
+- GEO_raw_matrix_AdV_year1_serum.tsv
+- GEO_platform_annotation_AdV_array.tsv
+- GEO_sample_annotation_AdV_year1_serum_Table1_aligned_with_1yr.tsv
+- GEO_TAC_episode_level_clean.tsv
+- GEO_TAC_column_name_map.csv (optional)
+- GEO_Clinical_Data_Dictionary_AllSheets.tsv (optional)
+
+Optionally (not part of GEO package by default):
+- clinical_severity.csv  (for Ruuska/severity analyses)
