@@ -40,6 +40,3 @@ Open and run:
 
 This script imports the same GEO-curated files and writes results tables to `outputs/tables/`.
 
-## Repositories (for RPPR / DMSP)
-- Data: **NIH GEO** (accession pending / to be inserted when assigned)
-- Code: this GitHub repo (recommended to archive a release to Zenodo for a DOI)
