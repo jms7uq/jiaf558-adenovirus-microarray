@@ -18,7 +18,7 @@ This code expects the GEO-curated tabular files (TSV/CSV) that you prepared for 
 
 Place these files in `data/` (or change paths in the scripts).
 
-> **Note**: The manuscript’s Ruuska severity analyses require Ruuska scores and/or their component clinical fields. These are not present in the public TAC episode-level file you uploaded here. The R script will automatically **skip severity plots/models** unless you supply an optional `data/clinical_severity.csv` (see comments in the script).
+
 
 ## How to run (R)
 1. Install packages (first run may take a few minutes):
