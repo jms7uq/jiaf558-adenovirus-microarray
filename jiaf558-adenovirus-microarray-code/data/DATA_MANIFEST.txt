@@ -1,5 +1,4 @@
-Place the following GEO-curated files in this folder (or change paths in scripts):
-
+Required inputs:
 - GEO_processed_matrix_AdV_year1_serum.tsv
 - GEO_raw_matrix_AdV_year1_serum.tsv
 - GEO_platform_annotation_AdV_array.tsv
@@ -8,3 +7,6 @@ Place the following GEO-curated files in this folder (or change paths in scripts
 - GEO_TAC_column_name_map.csv (optional)
 - GEO_Clinical_Data_Dictionary_AllSheets.tsv (optional)
 
+Supplementary inputs (for interpretation/reuse):
+- GEO_TAC_column_name_map.csv
+- GEO_Clinical_Data_Dictionary_AllSheets.tsv
