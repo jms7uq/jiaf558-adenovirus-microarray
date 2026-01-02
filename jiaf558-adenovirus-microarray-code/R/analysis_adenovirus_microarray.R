@@ -1,4 +1,4 @@
-#!/usr/bin/env Rscript
+#Rscript
 
 # Adenovirus 40/41 microarray analysis (JID doi:10.1093/infdis/jiaf558)
 # - Generates manuscript figures and runs random forest analysis
@@ -16,9 +16,14 @@
 #   outputs/tables/*.csv
 #
 # Manuscript-guided analysis:
-# - PCA performed on ranked antibody reactivities; retain leading PCs (n=8) and evaluate association with year-2 AdV40/41 infection.
+# - PCA on ranked antibody reactivities; retain leading PCs (n=8) and evaluate association with year-2 AdV40/41 infection.
 # - Logistic regression: year-2 infection ~ PC scores + year-1 infection; adjusted models include covariates (sex, enrollment HAZ, shared toilet).
+# - Forest plot of PC odds ratios (unadjusted/adjusted) with significance highlighting.
 # - Top PC loadings for PC2 include AdV40/41 penton base and fiber targets; compare across 4 infection groups (KW tests).
+# - Boxplots of top target reactivities by infection group; volcano-style plots for tertile associations.
+# - Timeline plot of TAC episodes and serum collection.
+# - Coinfection summaries, including AdV episode counts and pathogen AFe coinfection rates by year/group.
+# - Antibody comparisons by coinfection status (year-2 AdV+ episodes) and supplemental histograms for top antigens.
 # - Random forest with 10-fold CV, grid search for ntree/mtry; evaluate variable importance.
 #
 # References: Hendrick et al. J Infect Dis. doi:10.1093/infdis/jiaf558
@@ -34,6 +39,7 @@ suppressPackageStartupMessages({
   library(forcats)
   library(scales)
   library(patchwork)
+  library(ggrepel)
 })
 
 # ------------------------
@@ -54,10 +60,6 @@ FILES <- list(
   sample_annot      = file.path(DATA_DIR, "GEO_sample_annotation_AdV_year1_serum_Table1_aligned_with_1yr.tsv"),
   tac_episode      = file.path(DATA_DIR, "GEO_TAC_episode_level_clean.tsv")
 )
-
-# Optional clinical severity file (not in GEO package by default)
-# Required columns minimally: sample_id, episode_age_days, ruuska_score (or components to compute)
-OPTIONAL_SEVERITY <- file.path(DATA_DIR, "clinical_severity.csv")
 
 # ------------------------
 # Helper functions
@@ -248,12 +250,19 @@ pc_logit_out <- bind_rows(logit_unadj, logit_adj) %>%
 write_csv(pc_logit_out, file.path(TAB_DIR, "logistic_pcs_year2infection.csv"))
 
 # Forest plot of PC ORs (Supplementary)
-p_forest <- ggplot(pc_logit_out, aes(x = term, y = estimate, ymin = conf.low, ymax = conf.high, shape = model)) +
+p_forest <- pc_logit_out %>%
+  mutate(
+    significant = if_else(p.value < 0.05, "Significant", "Not Significant"),
+    term_label = if_else(term == "Year 1 infection", "Year 1 Infection Status", as.character(term)),
+    term_label = factor(term_label, levels = c(paste0("PC", 1:8), "Year 1 Infection Status"))
+  ) %>%
+  ggplot(aes(x = term_label, y = estimate, ymin = conf.low, ymax = conf.high, shape = model, color = significant)) +
   geom_pointrange(position = position_dodge(width = 0.6)) +
   geom_hline(yintercept = 1, linetype = 2) +
   coord_flip() +
   scale_y_log10() +
-  labs(x = NULL, y = "Odds ratio (95% CI)") +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  labs(x = NULL, y = "Odds ratio (95% CI)", color = NULL, shape = NULL) +
   theme_minimal(base_size = 12)
 
 ggsave(file.path(FIG_DIR, "supp_forestplot_pcs_year2infection.png"), p_forest, width = 8, height = 6, dpi = 300)
@@ -313,6 +322,11 @@ episodes2 <- episodes %>%
   mutate(sample_id = paste0("S_", sid)) %>%
   left_join(samples %>% select(sample_id, infection_group, serum_age_days), by = "sample_id") %>%
   mutate(
+    year = case_when(
+      diarr_specage <= 365 ~ 1L,
+      diarr_specage <= 730 ~ 2L,
+      TRUE ~ NA_integer_
+    ),
     adv_ct = suppressWarnings(as.numeric(adenovirus_40_41)),
     adv_afe = suppressWarnings(as.numeric(adenovirus_40_41_afe)),
     pcr_pos = !is.na(adv_ct) & adv_ct < 35,
@@ -479,14 +493,18 @@ ant_tidy <- bind_rows(
 ) %>%
   left_join(platform %>% select(id_ref, description), by = "id_ref") %>%
   mutate(log_or = log(estimate),
-         neglog10_p = -log10(p.value))
+         neglog10_p = -log10(p.value),
+         significant = if_else(p.value < 0.05, "Significant", "Not Significant"))
 
 write_csv(ant_tidy, file.path(TAB_DIR, "logistic_top7_targets_tertiles.csv"))
 
-p_volcano <- ggplot(ant_tidy, aes(x = log_or, y = neglog10_p, shape = model)) +
-  geom_point(alpha = 0.8) +
+p_volcano <- ggplot(ant_tidy, aes(x = log_or, y = neglog10_p, shape = model, color = significant)) +
+  geom_point(alpha = 0.8, size = 2.6) +
+  ggrepel::geom_text_repel(aes(label = description), size = 3, max.overlaps = 30) +
   geom_hline(yintercept = -log10(0.05), linetype = 2) +
-  labs(x = "log(OR) (tertile effect)", y = "-log10(p)") +
+  geom_vline(xintercept = 0, linetype = 2) +
+  scale_color_manual(values = c("Significant" = "red", "Not Significant" = "black")) +
+  labs(x = "log(OR) (tertile effect)", y = "-log10(p)", color = NULL, shape = "Model p value") +
   theme_minimal(base_size = 12)
 
 ggsave(file.path(FIG_DIR, "fig_volcano_top7_targets_tertiles.png"), p_volcano, width = 7, height = 6, dpi = 300)
@@ -507,10 +525,114 @@ episodes2 <- episodes2 %>%
 
 coinf_by_group <- episodes2 %>%
   filter(afe_pos) %>%
-  group_by(infection_group) %>%
+  group_by(infection_group, year) %>%
   summarize(coinfection_rate = mean(coinfection, na.rm = TRUE), n = n(), .groups = "drop")
 
 write_csv(coinf_by_group, file.path(TAB_DIR, "coinfection_rate_by_infection_group.csv"))
+
+# AdV episode counts per child-year (AdV+ episodes only)
+adv_episodes <- episodes2 %>%
+  filter(pcr_pos, !is.na(year)) %>%
+  group_by(sid, year, infection_group) %>%
+  summarize(adv_pos_episodes = n(), .groups = "drop") %>%
+  mutate(more_than_one = adv_pos_episodes > 1)
+
+adv_episode_summary <- adv_episodes %>%
+  group_by(infection_group, year) %>%
+  summarize(
+    total_children = n(),
+    children_more_than_one = sum(more_than_one),
+    percent_more_than_one = round(100 * children_more_than_one / total_children, 1),
+    median_episodes = median(adv_pos_episodes),
+    iqr_lower = quantile(adv_pos_episodes, 0.25),
+    iqr_upper = quantile(adv_pos_episodes, 0.75),
+    .groups = "drop"
+  )
+
+write_csv(adv_episode_summary, file.path(TAB_DIR, "adv_episode_counts_by_group_year.csv"))
+
+# Coinfection counts by number of AFe-positive pathogens among AdV+ episodes
+coinfection_counts <- episodes2 %>%
+  filter(pcr_pos) %>%
+  mutate(across(all_of(afe_other), ~ if_else(as.numeric(.x) >= 0.5, 1, 0))) %>%
+  rowwise() %>%
+  mutate(coinfection_count = sum(c_across(all_of(afe_other)), na.rm = TRUE)) %>%
+  ungroup()
+
+coinfection_count_summary <- coinfection_counts %>%
+  count(coinfection_count) %>%
+  arrange(desc(coinfection_count))
+
+write_csv(coinfection_count_summary, file.path(TAB_DIR, "coinfection_count_summary.csv"))
+
+# Antibody comparison by coinfection status (year-2 AdV+ episodes)
+antibody_vars <- c(
+  "HAdV_40_E2A_L_single_stranded_DNA_binding_pro",
+  "HAdV_40_IVa2_encap_pro_IVa2",
+  "HAdV_40_L1_capsid_pro_precur_pIIIa",
+  "HAdV_40_L1_encap_pro_52K",
+  "HAdV_40_L2_penton_base",
+  "HAdV_40_L5A_fiber_2",
+  "HAdV_40_L5_fiber",
+  "HAdV_41_E2A_DBP",
+  "HAdV_41_IIIa",
+  "HAdV_41_long_fiber_pro",
+  "HAdV_41_penton_base",
+  "HAdV_41_short_fiber_pro",
+  "HAdV_41_L2_pMu"
+)
+
+antibody_vars_present <- intersect(antibody_vars, processed$id_ref)
+df_ab <- proc_long %>%
+  filter(id_ref %in% antibody_vars_present) %>%
+  select(sample_id, id_ref, value) %>%
+  pivot_wider(names_from = id_ref, values_from = value)
+
+coinfection_status_year2 <- episodes2 %>%
+  filter(year == 2L, pcr_pos) %>%
+  mutate(across(all_of(afe_other), ~ if_else(as.numeric(.x) >= 0.5, 1, 0))) %>%
+  rowwise() %>%
+  mutate(coinfection_count = sum(c_across(all_of(afe_other)), na.rm = TRUE)) %>%
+  ungroup() %>%
+  group_by(sample_id) %>%
+  summarize(any_coinfection = any(coinfection_count >= 1), .groups = "drop")
+
+antibody_compare_df <- coinfection_status_year2 %>%
+  left_join(df_ab, by = "sample_id") %>%
+  mutate(coinfection_group = if_else(any_coinfection, "Coinfection", "No Coinfection"))
+
+antibody_long <- antibody_compare_df %>%
+  pivot_longer(cols = all_of(antibody_vars_present), names_to = "antigen", values_to = "antibody_level")
+
+antibody_tests <- antibody_long %>%
+  group_by(antigen) %>%
+  summarize(
+    p_value = {
+      grp_n <- n_distinct(coinfection_group)
+      if (grp_n < 2) NA_real_ else suppressWarnings(wilcox.test(antibody_level ~ coinfection_group)$p.value)
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_signif = case_when(
+      p_value <= 0.001 ~ "***",
+      p_value <= 0.01 ~ "**",
+      p_value <= 0.05 ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+write_csv(antibody_tests, file.path(TAB_DIR, "coinfection_antibody_wilcox.csv"))
+
+p_coinfection_antibodies <- ggplot(antibody_long, aes(x = coinfection_group, y = antibody_level)) +
+  geom_boxplot() +
+  facet_wrap(~ antigen, scales = "free_y") +
+  labs(x = NULL, y = "Antibody level") +
+  theme_bw(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(file.path(FIG_DIR, "fig_coinfection_antibody_boxplots.png"),
+       p_coinfection_antibodies, width = 12, height = 8, dpi = 300)
 
 # ------------------------
 # Correlation heatmap among external capsid targets (example heuristic)
@@ -532,26 +654,122 @@ save_heatmap(cor_mat, file.path(FIG_DIR, "supp_heatmap_external_capsid_spearman.
              main = "External capsid targets (Spearman correlation)")
 
 # ------------------------
-# Optional: severity analyses (requires additional clinical data)
+# Supplemental histograms of top antigens (PC2 loadings)
 # ------------------------
-if (file.exists(OPTIONAL_SEVERITY)) {
-  sev <- readr::read_csv(OPTIONAL_SEVERITY, show_col_types = FALSE) %>% clean_names()
-  # Expect columns: sample_id, episode_age_days, ruuska_score
-  if (all(c("sample_id","episode_age_days","ruuska_score") %in% names(sev))) {
-    sev2 <- sev %>% left_join(samples, by = "sample_id")
-    # Example plot: Ruuska score vs infection group (year-2 episodes only if flagged in file)
-    p_sev <- ggplot(sev2, aes(x = infection_group, y = ruuska_score)) +
-      geom_boxplot(outlier.shape = NA) +
-      geom_jitter(width = 0.2, alpha = 0.4, size = 1) +
-      theme_bw(base_size = 12) +
-      labs(x = NULL, y = "Ruuska score")
-    ggsave(file.path(FIG_DIR, "supp_ruuska_by_infection_group.png"), p_sev, width = 7, height = 5, dpi = 300)
-  } else {
-    message("clinical_severity.csv found, but required columns are missing; skipping severity analyses.")
-  }
-} else {
-  message("Optional clinical_severity.csv not found; skipping severity analyses.")
+top15_antigens <- loadings %>%
+  mutate(abs_pc2 = abs(PC2)) %>%
+  arrange(desc(abs_pc2)) %>%
+  slice_head(n = 15) %>%
+  pull(id_ref)
+
+antigen_labels <- platform %>%
+  filter(id_ref %in% top15_antigens) %>%
+  select(id_ref, description) %>%
+  deframe()
+
+hist_long <- proc_long %>%
+  filter(id_ref %in% top15_antigens) %>%
+  select(id_ref, value) %>%
+  mutate(id_ref = factor(id_ref, levels = top15_antigens)) %>%
+  rename(antigen = id_ref)
+
+p_hist <- ggplot(hist_long, aes(x = value)) +
+  geom_histogram(binwidth = 0.2, fill = "steelblue", color = "black") +
+  facet_wrap(~ antigen, labeller = labeller(antigen = antigen_labels), scales = "free_x", ncol = 4) +
+  labs(x = "Antibody level", y = "Count") +
+  theme_minimal(base_size = 11) +
+  theme(strip.text = element_text(size = 10))
+
+ggsave(file.path(FIG_DIR, "supp_hist_top15_antigens.png"), p_hist, width = 12, height = 9, dpi = 300)
+
+# ------------------------
+# Severity analyses (Ruuska score derived from TAC episode components)
+# ------------------------
+episodes_ruu <- episodes2 %>%
+  mutate(
+    ruu_dur_diarr = suppressWarnings(as.numeric(duradiar)),
+    ruu_max_diarr = suppressWarnings(as.numeric(maxdiar)),
+    ruu_dur_vomit = suppressWarnings(as.numeric(duravomi)),
+    ruu_max_vomit = suppressWarnings(as.numeric(maxvomi)),
+    ruu_fever_raw = suppressWarnings(as.numeric(temp)),
+    ruu_dehyd_raw = suppressWarnings(as.numeric(dehyd)),
+    ruu_treat_raw = suppressWarnings(as.numeric(rehyd))
+  ) %>%
+  mutate(
+    ruu_dur_vomit = if_else(is.na(ruu_dur_vomit) | ruu_dur_vomit == 9, 0, ruu_dur_vomit),
+    ruu_max_vomit = if_else(is.na(ruu_max_vomit) | ruu_max_vomit == 9, 0, ruu_max_vomit),
+    ruu_fever = if_else(ruu_fever_raw == 4, NA_real_, ruu_fever_raw),
+    ruu_dehyd = case_when(
+      ruu_dehyd_raw == 1 ~ 0,
+      ruu_dehyd_raw == 2 ~ 2,
+      TRUE ~ NA_real_
+    ),
+    ruu_treat = case_when(
+      ruu_treat_raw == 1 ~ 0,
+      ruu_treat_raw == 2 ~ 1,
+      ruu_treat_raw == 3 ~ 2,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  mutate(
+    ruuska_score = {
+      components <- c("ruu_dur_diarr", "ruu_max_diarr", "ruu_dur_vomit", "ruu_max_vomit", "ruu_fever", "ruu_dehyd", "ruu_treat")
+      score <- rowSums(across(all_of(components)), na.rm = TRUE)
+      if_else(rowSums(!is.na(across(all_of(components)))) == 0, NA_real_, score)
+    },
+    ruuska_cat = case_when(
+      is.na(ruuska_score) ~ NA_character_,
+      ruuska_score <= 6 ~ "Mild (0-6)",
+      ruuska_score <= 10 ~ "Moderate (7-10)",
+      TRUE ~ "Severe (>=11)"
+    )
+  )
+
+adv_epi_selected <- episodes_ruu %>%
+  filter(pcr_pos, year %in% c(1L, 2L)) %>%
+  group_by(sid, year) %>%
+  slice_min(adv_ct, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  left_join(samples %>% select(sample_id, infection_group, year1_infection, year2_infection), by = "sample_id")
+
+year2_severity <- adv_epi_selected %>%
+  filter(year == 2L, year2_infection == 1L) %>%
+  select(sample_id, sid, diarr_specage, adv_ct, adv_afe, ruuska_score, ruuska_cat, infection_group)
+
+write_csv(year2_severity, file.path(TAB_DIR, "year2_adv_selected_episode_severity.csv"))
+
+target_map <- platform %>%
+  mutate(desc_up = toupper(description)) %>%
+  mutate(
+    target_key = case_when(
+      str_detect(desc_up, "HADV-40") & str_detect(desc_up, "PENTON BASE") ~ "AdV40_PB",
+      str_detect(desc_up, "HADV-41") & str_detect(desc_up, "PENTON BASE") ~ "AdV41_PB",
+      str_detect(desc_up, "HADV-40") & (str_detect(desc_up, "FIBER-2") | str_detect(desc_up, "SHORT FIBER")) ~ "AdV40_short_fiber",
+      str_detect(desc_up, "HADV-41") & str_detect(desc_up, "SHORT FIBER") ~ "AdV41_short_fiber",
+      str_detect(desc_up, "HADV-41") & str_detect(desc_up, "LONG FIBER") ~ "AdV41_long_fiber",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(target_key)) %>%
+  select(id_ref, target_key)
+
+top_targets_year2 <- proc_long %>%
+  inner_join(target_map, by = "id_ref") %>%
+  group_by(sample_id, target_key) %>%
+  summarize(si_median = median(value, na.rm = TRUE), .groups = "drop") %>%
+  inner_join(year2_severity, by = "sample_id")
+
+safe_kw <- function(df) {
+  if (n_distinct(df$ruuska_cat, na.rm = TRUE) < 2) return(NA_real_)
+  suppressWarnings(kruskal.test(si_median ~ ruuska_cat, data = df)$p.value)
 }
+
+kw_severity <- top_targets_year2 %>%
+  group_by(target_key) %>%
+  summarize(p_kw = safe_kw(cur_data()), .groups = "drop")
+
+write_csv(top_targets_year2, file.path(TAB_DIR, "top_targets_year2_severity_long.csv"))
+write_csv(kw_severity, file.path(TAB_DIR, "top_targets_year2_severity_kw.csv"))
 
 # ------------------------
 # Save session info for reproducibility
