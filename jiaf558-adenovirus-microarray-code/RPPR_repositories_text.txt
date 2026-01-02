@@ -1,3 +1,1 @@
-Suggested RPPR text (Repositories section):
 
-Adenovirus 40/41 antibody microarray data and associated non-identifiable metadata have been (or will be) deposited in the NIH-supported Gene Expression Omnibus (GEO; accession pending). In parallel, all analysis code required to reproduce manuscript tables/figures (R scripts for figures and random forest; SAS scripts for Table 1 summaries, logistic regressions, and PCA) is maintained in a public, version-controlled GitHub repository (link to be provided). Upon receipt of GEO accession numbers, the LabArchives record and the manuscript will be updated to reference the GEO accession(s) to ensure alignment with the NIH Data Management and Sharing Plan.
