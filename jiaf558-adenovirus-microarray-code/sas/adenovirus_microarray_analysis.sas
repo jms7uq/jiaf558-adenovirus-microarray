@@ -5,11 +5,9 @@
    - Imports GEO-curated sample annotation + processed matrix + (optional) raw matrix
    - Generates Table 1 descriptive statistics (by infection group) with KW/chi-square tests
    - Performs rank-based PCA (METHOD=PRIN) retaining 8 PCs
-   - Runs logistic regressions for year-2 infection using PC scores and selected antibody tertiles
-   - Writes outputs to ../outputs/tables
-
-   NOTE: Manuscript Ruuska severity variables are not included in the public TAC file prepared for GEO in this workspace.
-         If you have a severity table, add it as data/clinical_severity.csv and merge similarly.
+   - Runs logistic regressions for year-2 infection using PC scores
+   - Runs severity analyses using Ruuska scoring derived from TAC episode-level clinical components (available in GEO)
+   - Writes outputs to ./outputs/tables
 */
 
 options nodate nonumber mprint mlogic symbolgen;
@@ -187,7 +185,8 @@ run;
 /* Merge PCA scores back with covariates */
 proc sql;
     create table work.pca_out as
-    select a.*, b.year1_infection, b.year2_infection,
+    select a.*, b.year1_infection_num as year1_infection,
+              b.year2_infection_num as year2_infection,
               b.maternal_bmi_upon_enrollment, b.child_sex,
               b.enrollment_haz, b.toilet_shared_with_other_households,
               b.child_waz_at_1_year
@@ -212,26 +211,160 @@ proc logistic data=work.pca_out descending;
         child_waz_at_1_year;
 run;
 
-/* ---------- Antibody tertiles logistic models (top targets) ---------- */
-/* Replace these IDs with exact Ag_* variable names after reviewing work.proc_idmap if needed. */
-%let TOPVARS=
-    HAdV_40_L1_capsid_pro_precur_pIIIa
-    HAdV_41_IIIa
-    HAdV_41_short_fiber_pro
-    HAdV_40_L5A_fiber_2
-    HAdV_41_penton_base
-    HAdV_40_penton_base
-    HAdV_41_long_fiber_pro
-;
+/* =======================================================================
+   Severity analyses (Ruuska score) – derived from TAC episode components
+   ======================================================================= */
 
-/* The imported antigen columns are named by id_sas (not the human-readable names above).
-   Two options:
-   (A) Use out.proc_idmap to identify the exact id_sas values for each target and update TOPVARS accordingly.
-   (B) Run these models in R (recommended for ease), where ID_REF strings can be matched directly.
-*/
+proc import datafile="&DATADIR./GEO_TAC_episode_level_clean.tsv"
+    out=work.episodes dbms=dlm replace;
+    delimiter='09'x;
+    getnames=yes;
+    guessingrows=max;
+run;
 
-/* Example: export the ID mapping for review */
-proc export data=work.proc_idmap outfile="&OUTDIR./antigen_id_map_for_sas.csv" dbms=csv replace; run;
+data work.episodes_ruu;
+    set work.episodes;
+    length sample_id $20;
+    sample_id = cats("S_", SID);
+
+    if Diarr_Specage <= 365 then year=1;
+    else if Diarr_Specage <= 730 then year=2;
+    else year=.;
+
+    adv_ct  = input(Adenovirus_40_41, best12.);
+    adv_afe = input(adenovirus_40_41_afe, best12.);
+    pcr_pos = (adv_ct ne . and adv_ct < 35);
+
+    ruu_dur_diarr = input(DURADIAR, best12.);
+    ruu_max_diarr = input(MAXDIAR, best12.);
+    ruu_dur_vomit = input(DURAVOMI, best12.);
+    ruu_max_vomit = input(MAXVOMI, best12.);
+    ruu_fever_raw = input(TEMP, best12.);
+    ruu_dehyd_raw = input(DEHYD, best12.);
+    ruu_treat_raw = input(REHYD, best12.);
+
+    if ruu_dur_vomit = . or ruu_dur_vomit = 9 then ruu_dur_vomit = 0;
+    if ruu_max_vomit = . or ruu_max_vomit = 9 then ruu_max_vomit = 0;
+
+    if ruu_fever_raw = 4 then ruu_fever = .;
+    else ruu_fever = ruu_fever_raw;
+
+    if ruu_dehyd_raw = 1 then ruu_dehyd = 0;
+    else if ruu_dehyd_raw = 2 then ruu_dehyd = 2;
+    else ruu_dehyd = .;
+
+    if ruu_treat_raw = 1 then ruu_treat = 0;
+    else if ruu_treat_raw = 2 then ruu_treat = 1;
+    else if ruu_treat_raw = 3 then ruu_treat = 2;
+    else ruu_treat = .;
+
+    ruuska_score = sum(ruu_dur_diarr, ruu_max_diarr, ruu_dur_vomit, ruu_max_vomit, ruu_fever, ruu_dehyd, ruu_treat);
+
+    length ruuska_cat $20;
+    if ruuska_score = . then ruuska_cat = "";
+    else if ruuska_score <= 6 then ruuska_cat = "Mild (0-6)";
+    else if ruuska_score <= 10 then ruuska_cat = "Moderate (7-10)";
+    else ruuska_cat = "Severe (>=11)";
+run;
+
+/* Select lowest-Ct AdV40/41 episode per child-year */
+proc sort data=work.episodes_ruu;
+    where pcr_pos=1 and year in (1,2);
+    by SID year adv_ct;
+run;
+
+data work.adv_epi_selected;
+    set work.episodes_ruu;
+    where pcr_pos=1 and year in (1,2);
+    by SID year adv_ct;
+    if first.year then output;
+run;
+
+proc sql;
+    create table work.adv_epi_selected2 as
+    select a.*, b.infection_group, b.year1_infection_num as year1_infection,
+              b.year2_infection_num as year2_infection
+    from work.adv_epi_selected as a
+    left join work.sample_annot as b
+    on a.sample_id = b.sample_id;
+quit;
+
+data work.year2_severity;
+    set work.adv_epi_selected2;
+    where year=2 and year2_infection=1;
+    keep sample_id SID Diarr_Specage adv_ct adv_afe ruuska_score ruuska_cat infection_group;
+run;
+
+proc export data=work.year2_severity outfile="&OUTDIR./year2_adv_selected_episode_severity.csv" dbms=csv replace; run;
+
+/* Import platform annotation so we can identify penton base / fiber targets */
+proc import datafile="&DATADIR./GEO_platform_annotation_AdV_array.tsv"
+    out=work.platform dbms=dlm replace;
+    delimiter='09'x;
+    getnames=yes;
+    guessingrows=max;
+run;
+
+/* Long-form processed matrix with ID_REF preserved */
+proc transpose data=work.proc_mapped out=work.proc_long2 name=sample_id;
+    by ID_REF;
+    var S_:;
+run;
+
+data work.proc_long2;
+    set work.proc_long2;
+    value = col1;
+    keep sample_id ID_REF value;
+run;
+
+proc sql;
+    create table work.proc_long_annot as
+    select a.sample_id, a.ID_REF, a.value, b.Description
+    from work.proc_long2 as a
+    left join work.platform as b
+    on a.ID_REF = b.ID_REF;
+quit;
+
+data work.top_targets;
+    set work.proc_long_annot;
+    length target_key $32;
+    desc_up = upcase(Description);
+
+    if index(desc_up, "HADV-40") and index(desc_up, "PENTON BASE") then target_key="AdV40_PB";
+    else if index(desc_up, "HADV-41") and index(desc_up, "PENTON BASE") then target_key="AdV41_PB";
+    else if index(desc_up, "HADV-40") and (index(desc_up, "FIBER-2") or index(desc_up,"SHORT FIBER")) then target_key="AdV40_short_fiber";
+    else if index(desc_up, "HADV-41") and index(desc_up, "SHORT FIBER") then target_key="AdV41_short_fiber";
+    else if index(desc_up, "HADV-41") and index(desc_up, "LONG FIBER") then target_key="AdV41_long_fiber";
+    else target_key="";
+
+    if target_key ne "";
+run;
+
+proc sort data=work.top_targets; by sample_id target_key; run;
+
+proc means data=work.top_targets noprint median;
+    by sample_id target_key;
+    var value;
+    output out=work.top_targets_summ(drop=_TYPE_ _FREQ_) median=si_median;
+run;
+
+proc sql;
+    create table work.top_targets_year2 as
+    select a.*, b.ruuska_cat, b.ruuska_score, b.infection_group
+    from work.top_targets_summ as a
+    inner join work.year2_severity as b
+    on a.sample_id = b.sample_id;
+quit;
+
+ods output KruskalWallisTest=out.year2_severity_kw;
+proc npar1way data=work.top_targets_year2 wilcoxon;
+    class ruuska_cat;
+    var si_median;
+    by target_key;
+run;
+
+proc export data=work.top_targets_year2 outfile="&OUTDIR./top_targets_year2_severity_long.csv" dbms=csv replace; run;
+proc export data=out.year2_severity_kw outfile="&OUTDIR./top_targets_year2_severity_kw.csv" dbms=csv replace; run;
 
 /* ---------- Save key outputs ---------- */
 proc export data=out.table1_cont_summary outfile="&OUTDIR./table1_cont_summary.csv" dbms=csv replace; run;
